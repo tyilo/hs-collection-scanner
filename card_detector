@@ -60,9 +60,14 @@ DEFAULT_MATCH_METHOD = MATCH_METHODS['TM_CCORR_NORMED']
 
 
 def api_get(path):
+	api_key = os.environ.get('HS_API_KEY')
+	if api_key == None:
+		print('HS_API_KEY not defined, please add it to .env', file=sys.stderr)
+		sys.exit(1)
+
 	URL_PREFIX = 'https://omgvamp-hearthstone-v1.p.mashape.com/'
 	r = requests.get(URL_PREFIX + path, headers={
-		'X-Mashape-Key': os.environ['HS_API_KEY']
+		'X-Mashape-Key': api_key
 	})
 	assert r.ok
 	# TODO: Assert Content-Type, non-empty
