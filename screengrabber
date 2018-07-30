@@ -1,0 +1,28 @@
+#!/usr/bin/env python3
+from subprocess import Popen, PIPE
+from time import sleep
+import datetime
+
+p = Popen(['xinput', 'test-xi2', '--root'], stdout=PIPE, encoding='utf-8')
+try:
+	while True:
+		l = p.stdout.readline().strip()
+		if not l.endswith('(RawButtonPress)'):
+			continue
+
+		while True:
+			l = p.stdout.readline().strip()
+			if not l.startswith('detail:'):
+				continue
+
+			detail = int(l.split()[-1])
+			if not detail == 1:
+				continue
+
+			now = datetime.datetime.now()
+			Popen(['import', '-window', 'root', f'screenshots/{now.isoformat()}.png'])
+
+			break
+except KeyboardInterrupt:
+	p.kill()
+

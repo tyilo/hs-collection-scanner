@@ -1,0 +1,491 @@
+#!/usr/bin/env python3
+from pathlib import Path
+from collections import defaultdict
+import json
+import argparse
+import sys
+import unittest
+import os
+
+import cv2
+import numpy as np
+import requests
+from requests_html import HTMLSession
+from progressbar import progressbar, ProgressBar
+import pyperclip
+from prompt_toolkit import prompt
+from prompt_toolkit.completion import WordCompleter
+from prompt_toolkit.validation import Validator
+
+
+class MatchMethod:
+	def __init__(self, method, threshold, x2_threshold):
+		self.method = method
+		self.threshold = threshold
+		self.x2_threshold = x2_threshold
+
+		# Only methods that supports masks
+		# https://github.com/opencv/opencv/blob/10ba6a93a6fee952fb7812b28989eb209d4f49a1/modules/imgproc/src/templmatch.cpp#L813
+		assert self.method in [cv2.TM_SQDIFF, cv2.TM_CCORR_NORMED]
+
+
+	@property
+	def min_best(self):
+		return self.method in [cv2.TM_SQDIFF, cv2.TM_SQDIFF_NORMED]
+
+
+	def _within_threshold(self, val, threshold):
+		if self.min_best:
+			return val < threshold
+		else:
+			return val > threshold
+
+
+	def card_matches(self, val):
+		return self._within_threshold(val, self.threshold)
+
+
+	def x2_matches(self, val):
+		return self._within_threshold(val, self.x2_threshold)
+
+
+MATCH_METHODS = {
+	'TM_CCORR_NORMED': MatchMethod(cv2.TM_CCORR_NORMED, 0.95, 0.98),
+
+	# Note: These thresholds have not been tweaked:
+	'TM_SQDIFF': MatchMethod(cv2.TM_SQDIFF, 6000, 5000),
+}
+
+DEFAULT_MATCH_METHOD = MATCH_METHODS['TM_CCORR_NORMED']
+
+
+def api_get(path):
+	URL_PREFIX = 'https://omgvamp-hearthstone-v1.p.mashape.com/'
+	r = requests.get(URL_PREFIX + path, headers={
+		'X-Mashape-Key': os.environ['HS_API_KEY']
+	})
+	assert r.ok
+	# TODO: Assert Content-Type, non-empty
+	return r.json()
+
+
+def get_all_cards():
+	try:
+		with open('cards.json') as f:
+			all_cards = json.load(f)
+	except FileNotFoundError:
+		print('Downloading card info...')
+		all_cards = api_get('cards')
+		with open('cards.json', 'w') as f:
+			json.dump(all_cards, f)
+
+	return all_cards
+
+
+def get_hearthpwn_cards():
+	try:
+		with open('cards_hp.json') as f:
+			hp_cards = json.load(f)
+	except FileNotFoundError:
+		print('Downloading hearthpwn cards...')
+
+		hp_cards = {}
+
+		session = HTMLSession()
+
+		prev_first_card = None
+		i = 0
+		done = False
+		while not done:
+			i += 1
+			r = session.get(f'https://www.hearthpwn.com/cards?display=1&filter-premium=1&page={i}')
+			assert r.ok
+			page_cards = r.html.find('.listing-body tbody .col-name a')
+
+			for j, card in enumerate(page_cards):
+				print(f'\r{i}', end='')
+				card_name = card.text
+				if j == 0:
+					if card_name == prev_first_card:
+						done = True
+						break
+
+					prev_first_card = card_name
+
+				hp_id = int(card.attrs['href'].split('/')[-1].split('-')[0])
+				hp_cards[card_name] = hp_id
+
+		print()
+
+		with open('cards_hp.json', 'w') as f:
+			json.dump(hp_cards, f)
+
+	return hp_cards
+
+
+def get_collection_cards():
+	all_cards = get_all_cards()
+
+	class_cards = defaultdict(list)
+
+	for typ, cards in all_cards.items():
+		for card in cards:
+			if not card.get('collectible'):
+				continue
+			if 'cost' not in card:
+				continue
+
+			class_cards[card['playerClass']].append(card)
+
+	sorted_classes = sorted(class_cards.keys(), key=lambda c: (c == 'Neutral', c))
+
+	sorted_cards = []
+	for cls in sorted_classes:
+		cards = class_cards[cls]
+		cards.sort(key=lambda c: (c['cost'], c['name']))
+		sorted_cards += cards
+
+	return sorted_cards
+
+
+def get_card_path(card_id, gold=False):
+	suffix = '_gold' if gold else ''
+	return Path('cards') / f'{card_id}{suffix}.png'
+
+
+def get_image(path, flags=cv2.IMREAD_COLOR):
+	img = cv2.imread(str(path), flags)
+	assert img is not None, f'Could not open file at {path}'
+	return img
+
+
+def get_image_with_alpha(path):
+	return get_image(path, cv2.IMREAD_UNCHANGED)
+
+
+def get_card_image(card_id, gold=False):
+	return get_image_with_alpha(get_card_path(card_id, gold))
+
+
+def download_card_images():
+	cards = get_collection_cards()
+	for card in progressbar(cards):
+		for gold in [False, True]:
+			# Gold only works some times?
+			if gold:
+				continue
+
+			p = get_card_path(card['cardId'], gold)
+			if p.exists():
+				continue
+
+			card_img_url = card['img']
+			if gold:
+				# We don't want animated gold images,
+				# so we can't use card['imgGold']
+				prefix, ext = card_img_url.rsplit('.', 1)
+				card_img_url = f'{prefix}_premium.{ext}'
+
+			r = requests.get(card_img_url)
+			assert r.ok
+			with p.open('wb') as f:
+				f.write(r.content)
+
+	print()
+
+
+def crop_transparent(img):
+	transparents = img[:,:,3] != 255
+	transparent_cols = np.apply_along_axis(all, 0, transparents)
+	transparent_rows = np.apply_along_axis(all, 1, transparents)
+
+	opaque_indices_y = np.where(~transparent_cols)[0]
+	opaque_indices_x = np.where(~transparent_rows)[0]
+
+	y1 = opaque_indices_y[0]
+	y2 = opaque_indices_y[-1]
+	x1 = opaque_indices_x[0]
+	x2 = opaque_indices_x[-1]
+
+	return img[x1:x2+1, y1:y2+1]
+
+
+def transform_card(card_img):
+	# Works for card images from http://hearthstoneapi.com/
+	RESIZE_WIDTH = 247
+
+	h, w, _ = card_img.shape
+	SIZE = (RESIZE_WIDTH, h * RESIZE_WIDTH // w)
+
+	card_img = cv2.resize(card_img, dsize=SIZE, interpolation=cv2.INTER_AREA)
+	card_img = crop_transparent(card_img)
+
+	return card_img
+
+
+def split_mask(img):
+	channels = cv2.split(img)
+	assert len(channels) == 4
+
+	*color_channels, alpha_channel = channels
+
+	mask = np.zeros_like(alpha_channel)
+	mask[alpha_channel == 255] = 1
+
+	return cv2.merge(color_channels), cv2.merge([mask] * 3)
+
+
+def best_template_match(image, template, method, mask=None):
+	result = cv2.matchTemplate(image, template, method.method, mask=mask)
+	min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
+
+	best_val, best_loc = (min_val, min_loc) if method.min_best else (max_val, max_loc)
+
+	height, width = template.shape[:-1]
+	best_rect = (best_loc, (best_loc[0] + width, best_loc[1] + height))
+
+	return best_val, best_rect
+
+
+def match_card(img, card_img, method):
+	card_img = transform_card(card_img)
+	card_img, card_mask = split_mask(card_img)
+	return best_template_match(img, card_img, method, card_mask)
+
+
+def get_thresholds(img, good_card_ids, method=DEFAULT_MATCH_METHOD):
+	mins = [float('inf')] * 2
+	maxs = [float('-inf')] * 2
+
+	card_paths = set(Path('cards').iterdir())
+	good_card_paths = set(get_card_path(card_id) for card_id in good_card_ids)
+
+	for card_path in progressbar(card_paths):
+		good = card_path in good_card_paths
+		card_img = get_image_with_alpha(card_path)
+		val, _ = match_card(img, card_img, method)
+		mins[good] = min(mins[good], val)
+		maxs[good] = max(maxs[good], val)
+
+	return (mins, maxs)
+
+
+X2_IMG = get_image('x2.png')
+
+def get_card_location(img, card_img, method=DEFAULT_MATCH_METHOD):
+	val, rect = match_card(img, card_img, method)
+
+	if not method.card_matches(val):
+		return 0, None
+
+	# Check for x2
+	Y_MARGIN = 20
+
+	x1 = rect[0][0]
+	x2 = rect[1][0]
+	y1 = rect[1][1] - Y_MARGIN
+	y2 = y1 + X2_IMG.shape[0] + 2 * Y_MARGIN
+
+	match_img = img[y1:y2+1, x1:x2+1]
+	x2_val, x2_rect = best_template_match(match_img, X2_IMG, method)
+
+	amount = 2 if method.x2_matches(x2_val) else 1
+
+	return amount, rect
+
+
+SHOULD_RUN_SLOW_TESTS = False
+class ThresholdTest(unittest.TestCase):
+	SCREENSHOT_DATA = {
+		'screenshot1.png': {
+			'EX1_169': 2, # Innervate
+			'CS2_008': 2, # Moonfire
+			'CS2_005': 2, # Claw
+			'EX1_161': 2, # Naturalize
+			#'EX1_161_gold': 1, # Naturalize Golden
+			'CS2_009': 2, # Mark of the Wild
+			'EX1_160': 2, # Power of the Wild
+			'CS2_013': 2, # Wild Growth
+		},
+		'screenshot2.png': {
+			'GIL_663': 1, # Witchwood Apple
+			'ICC_808': 1, # Crypt Lord
+			'GIL_188': 2, # Druid of the Scythe
+			'GIL_637': 2, # Ferocious Howl
+			'CS2_007': 2, # Healing Touch
+			'EX1_155': 2, # Mark of Nature
+			'CS2_011': 2, # Savage Roar
+			'GIL_571': 1, # Witching Hour
+		}
+	}
+
+
+	def test_threshold(self, method=DEFAULT_MATCH_METHOD):
+		if not SHOULD_RUN_SLOW_TESTS:
+			self.skipTest('Skipped test because it is slow. Rerun with --test-slow to run this test.')
+
+		for screenshot_path, good_cards in self.SCREENSHOT_DATA.items():
+			img = get_image('test/' + screenshot_path)
+
+			good_card_ids = good_cards.keys()
+
+			mins, maxs = get_thresholds(img, good_card_ids, method)
+			print(f'Good:     {mins[True]} - {maxs[True]}')
+			print(f'Bad:      {mins[False]} - {maxs[False]}')
+			#print( 'Diff:    ', min_good - max_bad)
+			#print( 'Average: ', (min_good + max_bad) / 2)
+
+			self.assertTrue(method.card_matches(mins[True]))
+			self.assertTrue(method.card_matches(maxs[True]))
+
+			self.assertFalse(method.card_matches(mins[False]))
+			self.assertFalse(method.card_matches(maxs[False]))
+
+
+	def test_amount(self, method=DEFAULT_MATCH_METHOD):
+		for screenshot_path, good_cards in self.SCREENSHOT_DATA.items():
+			img = get_image('test/' + screenshot_path)
+
+			for card_id, amount in good_cards.items():
+				card_img = get_card_image(card_id)
+				detected_amount, loc = get_card_location(img, card_img, method)
+				self.assertEqual(detected_amount, amount)
+
+
+def show_match(img, rect):
+	img = np.copy(img)
+	cv2.rectangle(img, rect[0], rect[1], (0, 0, 0), 2)
+	cv2.imshow('match', img)
+
+
+def wait():
+	while True:
+		k = cv2.waitKey(0)
+		if k == 27:
+			break
+
+
+def find_cards_from_screenshots():
+	all_cards = get_collection_cards()
+	name_to_card = {c['name']: c for c in all_cards}
+
+	hp_cards = get_hearthpwn_cards()
+
+	# Ensure we know all cards' hp id
+	assert set(name_to_card.keys()) - set(hp_cards.keys()) == set()
+
+	screenshot_paths = sorted(Path('screenshots').iterdir())
+	screenshot_i = 0
+	screenshot = get_image(screenshot_paths[0])
+	next_screenshot = get_image(screenshot_paths[1])
+
+	print(f'Screenshot {screenshot_i}:')
+	cards_found = []
+
+	for card in all_cards:
+		card_img = get_card_image(card['cardId'])
+
+		amount, loc = get_card_location(screenshot, card_img)
+		if loc:
+			cards_found.append((amount, card))
+			print('', amount, card['name'])
+		else:
+			if next_screenshot is None:
+				continue
+
+			amount, loc = get_card_location(next_screenshot, card_img)
+			if not loc:
+				continue
+
+			cards_found.append((amount, card))
+
+			screenshot_i += 1
+			print()
+			print(f'Screenshot {screenshot_i}:')
+			print('', amount, card['name'])
+
+			screenshot = next_screenshot
+			if screenshot_i + 1 < len(screenshot_paths):
+				next_screenshot = get_image(screenshot_paths[screenshot_i + 1])
+			else:
+				next_screenshot = None
+
+			continue
+
+	hp_string = ''
+	for amount, card in cards_found:
+		card_name = card['name']
+		hp_string += f'{hp_cards[card_name]}:{amount};'
+
+	js_string = f'$("#field-card-list").val("{hp_string}");'
+	pyperclip.copy(js_string)
+
+	print('Go to https://www.hearthpwn.com/members/Tyilo/collection/edit')
+	print('Then paste the copied code in the console and click "Save Collection":')
+
+
+def input_cards_manually():
+	all_cards = get_collection_cards()
+	name_to_card = {c['name']: c for c in all_cards}
+
+	hp_cards = get_hearthpwn_cards()
+
+	# Ensure we know all cards' hp id
+	assert set(name_to_card.keys()) - set(hp_cards.keys()) == set()
+
+	card_completer = WordCompleter(name_to_card.keys(), sentence=True)
+	# amount_completer = WordCompleter(['1', '2'], sentence=True)
+
+	def valid_card(text):
+		return text in name_to_card
+
+	card_validator = Validator.from_callable(
+		valid_card,
+		error_message='This is an unknown card',
+		move_cursor_to_end=True)
+
+	amount_validator = Validator.from_callable(
+		lambda text: text in ['', '1', '2'],
+		error_message='Invalid amount',
+		move_cursor_to_end=True)
+
+	#owned_cards = []
+	hp_string = ''
+
+	while True:
+		try:
+			card_name = prompt('Card name: ',
+							   completer=card_completer, complete_while_typing=True,
+							   validator=card_validator, validate_while_typing=False)
+
+			amount = prompt('Amount [2]: ',
+							validator=amount_validator, validate_while_typing=True)
+
+			if not amount:
+				amount = '2'
+
+			amount = int(amount)
+
+			hp_string += f'{hp_cards[card_name]}:{amount};'
+			#owned_cards.append((name_to_card[card_name], amount))
+
+		except (EOFError, KeyboardInterrupt):
+			break
+
+
+	print(hp_string)
+
+
+if __name__ == '__main__':
+	parser = argparse.ArgumentParser()
+	parser.add_argument('--test', action='store_true')
+	parser.add_argument('--test-slow', action='store_true')
+
+	args = parser.parse_args()
+
+	SHOULD_RUN_SLOW_TESTS = args.test_slow
+
+	if args.test or args.test_slow:
+		unittest.main(argv=[sys.argv[0]])
+	else:
+		find_cards_from_screenshots()
