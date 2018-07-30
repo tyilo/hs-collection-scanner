@@ -5,6 +5,8 @@ import datetime
 
 p = Popen(['xinput', 'test-xi2', '--root'], stdout=PIPE, encoding='utf-8')
 try:
+	count = 0
+	print('Waiting for clicks...')
 	while True:
 		l = p.stdout.readline().strip()
 		if not l.endswith('(RawButtonPress)'):
@@ -20,9 +22,13 @@ try:
 				continue
 
 			now = datetime.datetime.now()
-			Popen(['import', '-window', 'root', f'screenshots/{now.isoformat()}.png'])
+			path = f'screenshots/{now.isoformat()}.png'
+			print(f'Saving screenshot to {path}')
+
+			Popen(['import', '-window', 'root', path])
+			count += 1
 
 			break
 except KeyboardInterrupt:
 	p.kill()
-
+	print(f'Saved a total of {count} screenshots.')
