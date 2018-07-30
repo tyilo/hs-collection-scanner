@@ -173,8 +173,12 @@ def get_card_image(card_id, gold=False):
 
 
 def download_card_images():
-	cards = get_collection_cards()
-	for card in progressbar(cards):
+	missing_cards = [card for card in get_collection_cards() if not get_card_path(card['cardId']).exists()]
+	if len(missing_cards) == 0:
+		return
+
+	print('Downloading card images...')
+	for card in progressbar(missing_cards):
 		for gold in [False, True]:
 			# Gold only works some times?
 			if gold:
@@ -258,11 +262,15 @@ def match_card(img, card_img, method):
 	return best_template_match(img, card_img, method, card_mask)
 
 
+def normal_files(path):
+	return (p for p in Path(path).iterdir() if not p.name.startswith('.'))
+
+
 def get_thresholds(img, good_card_ids, method=DEFAULT_MATCH_METHOD):
 	mins = [float('inf')] * 2
 	maxs = [float('-inf')] * 2
 
-	card_paths = set(Path('cards').iterdir())
+	card_paths = set(normal_files('cards'))
 	good_card_paths = set(get_card_path(card_id) for card_id in good_card_ids)
 
 	for card_path in progressbar(card_paths):
@@ -379,7 +387,7 @@ def find_cards_from_screenshots():
 	# Ensure we know all cards' hp id
 	assert set(name_to_card.keys()) - set(hp_cards.keys()) == set()
 
-	screenshot_paths = sorted(Path('screenshots').iterdir())
+	screenshot_paths = sorted(normal_files('screenshots'))
 	screenshot_i = 0
 	screenshot = get_image(screenshot_paths[0])
 	next_screenshot = get_image(screenshot_paths[1])
@@ -489,6 +497,8 @@ if __name__ == '__main__':
 	args = parser.parse_args()
 
 	SHOULD_RUN_SLOW_TESTS = args.test_slow
+
+	download_card_images()
 
 	if args.test or args.test_slow:
 		unittest.main(argv=[sys.argv[0]])
