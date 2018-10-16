@@ -75,8 +75,11 @@ def api_get(path):
 	return r.json()
 
 
-def get_all_cards():
+def get_all_cards(update=False):
 	try:
+		if update:
+			raise FileNotFoundError
+
 		with open('cards.json') as f:
 			all_cards = json.load(f)
 	except FileNotFoundError:
@@ -88,8 +91,11 @@ def get_all_cards():
 	return all_cards
 
 
-def get_hearthpwn_cards():
+def get_hearthpwn_cards(update=False):
 	try:
+		if update:
+			raise FileNotFoundError
+
 		with open('cards_hp.json') as f:
 			hp_cards = json.load(f)
 	except FileNotFoundError:
@@ -511,22 +517,26 @@ def input_cards_manually():
 
 if __name__ == '__main__':
 	parser = argparse.ArgumentParser()
-	parser.add_argument('--test', action='store_true', help='Run normal tests')
-	parser.add_argument('--test-slow', action='store_true', help='Run tests including slow ones')
-	parser.add_argument('--export', type=argparse.FileType('w'), help='Export a json file with cards iin your collection')
+	subparsers = parser.add_subparsers(dest='command', required=True)
+
+	parser_test = subparsers.add_parser('test', help='Run tests')
+	parser_test.add_argument('--slow', action='store_true', help='Also run slow tests')
+
+	parser_detect = subparsers.add_parser('detect')
+	parser_detect.add_argument('--export', type=argparse.FileType('w'), help='Export a json file with cards in your collection')
+
+	parser_detect = subparsers.add_parser('update', help='Update the list of cards')
 
 	args = parser.parse_args()
 
-	SHOULD_RUN_SLOW_TESTS = args.test_slow
-
-	download_card_images()
-
-	if args.test or args.test_slow:
-		if args.export:
-			print('Export option can\'t be used with --test or --test-slow', file=sys.stderr)
-			Path(args.export.name).unlink()
-			sys.exit(1)
-
+	if args.command == 'test':
+		download_card_images()
+		SHOULD_RUN_SLOW_TESTS = args.slow
 		unittest.main(argv=[sys.argv[0]])
-	else:
+	elif args.command == 'detect':
+		download_card_images()
 		find_cards_from_screenshots(args.export)
+	elif args.command == 'update':
+		get_all_cards(True)
+		get_hearthpwn_cards(True)
+		download_card_images()
