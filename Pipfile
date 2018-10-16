@@ -11,6 +11,7 @@ prompt-toolkit = "*"
 requests-html = "*"
 pyperclip = "*"
 opencv-python = "*"
+unidecode = "*"
 
 [dev-packages]
 

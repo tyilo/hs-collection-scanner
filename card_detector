@@ -16,6 +16,7 @@ import pyperclip
 from prompt_toolkit import prompt
 from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.validation import Validator
+import unidecode
 
 
 class MatchMethod:
@@ -385,7 +386,15 @@ def find_cards_from_screenshots(out_file):
 	hp_cards = get_hearthpwn_cards()
 
 	# Ensure we know all cards' hp id
-	assert set(name_to_card.keys()) - set(hp_cards.keys()) == set()
+	# Note: "Weaponized Piñata" is called "Weaponized Pinata" on hearthpwn
+
+	hp_unknowns = set(name_to_card.keys()) - set(hp_cards.keys())
+	for name in hp_unknowns:
+		ascii_name = unidecode.unidecode(name)
+		if ascii_name in hp_cards:
+			hp_cards[name] = hp_cards[ascii_name]
+		else:
+			assert False, f'Card not found on hearthpwn: {name}'
 
 	screenshot_paths = sorted(normal_files('screenshots'))
 	screenshot_i = 0
