@@ -263,10 +263,20 @@ def best_template_match(image, template, method, mask=None):
 	return best_val, best_rect
 
 
-def match_card(img, card_img, method):
+def match_card(img, card_img, method, rects=None):
 	card_img = transform_card(card_img)
 	card_img, card_mask = split_mask(card_img)
-	return best_template_match(img, card_img, method, card_mask)
+
+	if rects == None:
+		h, w, _ = img.shape
+		rects = [((0, 0), (w, h))]
+
+	best = (float('inf') * (1 if method.min_best else -1), None)
+	best_f = min if method.min_best else max
+	for (x1, y1), (x2, y2) in rects:
+		best = best_f(best, best_template_match(img[y1:y2+1, x1:x2+1], card_img, method, card_mask))
+
+	return best
 
 
 def normal_files(path):
@@ -292,8 +302,8 @@ def get_thresholds(img, good_card_ids, method=DEFAULT_MATCH_METHOD):
 
 X2_IMG = get_image('x2.png')
 
-def get_card_location(img, card_img, method=DEFAULT_MATCH_METHOD):
-	val, rect = match_card(img, card_img, method)
+def get_card_location(img, card_img, method=DEFAULT_MATCH_METHOD, rects=None):
+	val, rect = match_card(img, card_img, method, rects)
 
 	if not method.card_matches(val):
 		return 0, None
@@ -385,6 +395,11 @@ def wait():
 			break
 
 
+def add_margin(rect, margin):
+	(x1, y1), (x2, y2) = rect
+	return ((x1 - margin, y1 - margin), (x2 + margin, y2 + margin))
+
+
 def find_cards_from_screenshots(out_file):
 	all_cards = get_collection_cards()
 	name_to_card = {c['name']: c for c in all_cards}
@@ -409,21 +424,28 @@ def find_cards_from_screenshots(out_file):
 
 	print(f'Screenshot {screenshot_i}:')
 	cards_found = []
+	card_rects = []
 
 	for card in all_cards:
 		card_img = get_card_image(card['cardId'])
 
-		amount, loc = get_card_location(screenshot, card_img)
+		amount, loc = get_card_location(screenshot, card_img, rects=None if screenshot_i == 0 else card_rects)
 		if loc:
+			if screenshot_i == 0:
+				card_rects.append(add_margin(loc, 20))
+
 			cards_found.append((amount, card))
 			print('', amount, card['name'])
 		else:
 			if next_screenshot is None:
 				continue
 
-			amount, loc = get_card_location(next_screenshot, card_img)
+			amount, loc = get_card_location(next_screenshot, card_img, rects=None if screenshot_i == 0 else card_rects)
 			if not loc:
 				continue
+
+			if screenshot_i == 0:
+				assert len(card_rects) == 8
 
 			cards_found.append((amount, card))
 
